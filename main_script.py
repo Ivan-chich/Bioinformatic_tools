@@ -1,6 +1,27 @@
+import argparse
+import logging
+import os
 from abc import ABC, abstractmethod
 from Bio import SeqIO
 from Bio.SeqUtils import GC
+
+
+# Настройка логирования
+logging.basicConfig(
+    filename='filter_fastq.log',  # Имя файла для логов
+    level=logging.DEBUG,  # Уровень логирования
+    format='%(asctime)s - %(levelname)s - %(message)s',  # Формат сообщений
+    filemode='w'  # Перезаписываем файл лога при каждом запуске
+)
+
+
+# Настройка логирования для ошибок
+error_logging = logging.getLogger('error_logger')
+error_handler = logging.FileHandler('filter_fastq_errors.log', mode='w')  # Перезаписываем файл ошибокerror_handler.setLevel(logging.ERROR)
+error_handler.setLevel(logging.ERROR)
+error_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+error_handler.setFormatter(error_formatter)
+error_logging.addHandler(error_handler)
 
 
 class SequenceError(Exception):
@@ -33,6 +54,9 @@ class BiologicalSequence(ABC):
 
 class NucleicAcidSequence(BiologicalSequence):
     def __init__(self, input_item):
+        if not input_item:  # Проверка на пустую строку
+            raise SequenceError("Последовательность не может быть пустой!")
+        
         self.sequence = input_item.upper()  # Приводим к верхнему регистру
         if type(input_item) not in ["__main__.DNASequence", "__main__.RNASequence"]:
             raise NotImplementedError(
@@ -67,6 +91,9 @@ class NucleicAcidSequence(BiologicalSequence):
 
 class DNASequence(NucleicAcidSequence):
     def __init__(self, sequence):
+        if not sequence:  # Проверка на пустую строку
+            raise SequenceError("Последовательность не может быть пустой!")
+        
         self.sequence = sequence.upper()  # Приводим к верхнему регистру
         if not NucleicAcidSequence.__is_valid__(sequence, alphabet="ACGT"):
             raise SequenceError("В последовательности ДНК есть недопустимые символы!")
@@ -152,23 +179,64 @@ def filter_fastq(
     :param min_quality: Минимальное среднее качество.
     :param min_gc_content: Минимальный процент GC-содержания (в диапазоне от 0 до 100).
     """
+
+    # обработка ошибки, когда не указаны имена для файлов ввода и вывода
+    if not input_file or not output_file:
+       error_logging.error("Не переданы аргументы input_file или output_file.")
+       raise ValueError("Не переданы аргументы input_file или output_file.")
+    
+    # обработка ошибки, когда файл ввода не существует
+    if not os.path.exists(input_file):  
+       error_logging.error(f"Файл {input_file} не существует.")
+       raise FileNotFoundError(f"Файл {input_file} не существует.")
+    
     with open(output_file, "w") as out_handle:
         for record in SeqIO.parse(input_file, "fastq"):
             # Проверка длины
             if len(record.seq) < min_length:
+                logging.warning(f"Запись {record.id} пропущена из-за недостаточной длины.")
                 continue
 
             # Проверка качества
             quality_scores = record.letter_annotations["phred_quality"]
             avg_quality = sum(quality_scores) / len(quality_scores)
             if avg_quality < min_quality:
+                logging.warning(f"Запись {record.id} пропущена из-за низкого качества.")
                 continue
 
             # Проверка GC-содержания
             gc_content = GC(record.seq)
             if gc_content < min_gc_content:
+                logging.warning(f"Запись {record.id} пропущена из-за низкого GC-содержания.")
                 continue
 
             # Если все условия выполнены, записываем в выходной файл
             SeqIO.write(record, out_handle, "fastq")
 
+if __name__ == "__main__":
+    
+    # Создание парсера аргументов командной строки.
+    parser = argparse.ArgumentParser(description="Фильтрация FASTQ-файлов.")
+    parser.add_argument("input_file", help="Путь к входному FASTQ-файлу.")
+    parser.add_argument("output_file", help="Путь к выходному FASTQ-файлу.")
+    parser.add_argument("--min_length", type=int,
+                        default=0,
+                        help="Минимальная длина последовательности (по умолчанию: %(default)s).")
+    parser.add_argument("--min_quality", type=float,
+                        default=0,
+                        help="Минимальное среднее качество (по умолчанию: %(default)s).")
+    parser.add_argument("--min_gc_content", type=float,
+                        default=0,
+                        help="Минимальный процент GC-содержания (по умолчанию: %(default)s).")
+
+    try:
+       args = parser.parse_args()
+    except SystemExit as e:
+       error_logging.error(f"Ошибка при разборе аргументов командной строки: {e}")
+       raise
+
+    # Вызов функции фильтрации с аргументами из командной строки.
+    try:
+        filter_fastq(args.input_file,args.output_file,args.min_length,args.min_quality,args.min_gc_content)
+    except Exception as e:
+        logging.error(f"Произошла ошибка: {e}")
